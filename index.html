@@ -84,7 +84,7 @@
     box-shadow:0 16px 44px -14px rgba(124,92,255,.4)}
   .bg-grid-fade{background:#000000}
   body.has-custom-bg::before{content:"";position:fixed;inset:0;z-index:-2;background-image:var(--site-bg-image);
-    background-size:cover;background-position:center;background-attachment:fixed}
+    background-size:cover;background-position:center}
   body.has-custom-bg::after{content:"";position:fixed;inset:0;z-index:-1;background:rgba(0,0,0,var(--site-bg-overlay,0.9))}
   #hero-overlay{background:linear-gradient(90deg, rgba(0,0,0,var(--hero-overlay,.5)) 15%, rgba(0,0,0,calc(var(--hero-overlay,.5) * 0.6)) 55%, rgba(0,0,0,0) 100%)}
   /* Textura de noise global removida a pedido: fundo deve ser preto puro e contínuo, sem padrão de pontos */
@@ -757,6 +757,41 @@
   .sorteio-modal-card{position:relative;overflow:hidden}
   .sorteio-modal-card::before{content:"";position:absolute;left:0;top:0;width:100%;height:2px;z-index:20;
     background:linear-gradient(90deg,#7c5cff,#00e6a8,#7c5cff);background-size:200% 100%;animation:badgeShine 3.5s linear infinite}
+
+  /* =====================================================================
+     PERFORMANCE / FLUIDEZ NO SCROLL
+     ===================================================================== */
+  /* canvas de partículas: agora fixo no tamanho da tela (antes tinha a altura da página inteira) */
+  #particles-canvas{position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:-1;opacity:.85;pointer-events:none}
+
+  /* backdrop-filter recalcula o desfoque a cada frame de scroll — removido dos elementos que ficam
+     na tela o tempo todo (header, cards, categorias). Fundos ficaram mais opacos pra manter a leitura. */
+  .glass,header.sticky,.backdrop-blur,.cat-btn,.game-tile-icon,.hero-badge,.hero-cta-secondary,
+  .category-nav-btn,#empty-state{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+  .glass,header.sticky.glass{background:rgba(8,9,13,.95)}
+  .cat-btn{box-shadow:none}
+
+  /* cards: uma camada de GPU por card (will-change + preserve-3d) pesava muito; só na hora do tilt */
+  .product-card{transform-style:flat;will-change:auto;contain:layout style}
+  .product-card.tilt{will-change:transform}
+
+  /* brilho animado infinito em TODOS os cards (box-shadow/background-position = repaint contínuo).
+     Agora só anima quando o mouse está no card. */
+  .product-card .glow-cta{animation:none}
+  .product-card:hover .glow-cta{animation:ctaGlow 2.2s ease-in-out infinite}
+  .product-card .badge-hot,.product-card .badge-shine,.product-card .badge-last{animation:none}
+  .product-card:hover .badge-hot,.product-card:hover .badge-shine,.product-card:hover .badge-last{animation:badgeShine 2.8s linear infinite}
+
+  /* orbs do hero: blur(80px) em elemento animado é caríssimo; o radial-gradient já é suave */
+  .hero-glow-orb{filter:none;will-change:transform}
+
+  /* seções abaixo da dobra só são renderizadas quando chegam perto da tela */
+  #depoimentos,#faq,footer.border-t{content-visibility:auto;contain-intrinsic-size:auto 600px}
+
+  @media(prefers-reduced-motion:reduce){
+    .product-card:hover .glow-cta,.product-card:hover .badge-hot,
+    .product-card:hover .badge-shine,.product-card:hover .badge-last{animation:none}
+  }
 </style>
 </head>
 <body class="min-h-screen bg-noise site-locked">
@@ -5169,9 +5204,16 @@ window.shockThenOpen = (evt, id) => {
 /* spotlight elétrico + inclinação 3D (tilt) que seguem o mouse em cima dos cards */
 const productsGridEl = document.getElementById("products-grid");
 
-productsGridEl.addEventListener("mousemove", (e) => {
-  const card = e.target.closest(".product-card");
-  document.querySelectorAll(".product-card.tilt").forEach((c) => { if (c !== card) resetTilt(c); });
+let tiltCard = null;
+let tiltRaf = null;
+let tiltEvt = null;
+
+function applyTilt() {
+  tiltRaf = null;
+  const e = tiltEvt;
+  if (!e) return;
+  const card = e.target.closest ? e.target.closest(".product-card") : null;
+  if (tiltCard && tiltCard !== card) { resetTilt(tiltCard); tiltCard = null; }
   if (!card) return;
 
   const rect = card.getBoundingClientRect();
@@ -5179,16 +5221,20 @@ productsGridEl.addEventListener("mousemove", (e) => {
   const y = e.clientY - rect.top;
   card.style.setProperty("--x", `${x}px`);
   card.style.setProperty("--y", `${y}px`);
-
-  const rx = ((x / rect.width) - 0.5) * 12;
-  const ry = ((y / rect.height) - 0.5) * -12;
-  card.style.setProperty("--rx", `${rx}deg`);
-  card.style.setProperty("--ry", `${ry}deg`);
+  card.style.setProperty("--rx", `${((x / rect.width) - 0.5) * 12}deg`);
+  card.style.setProperty("--ry", `${((y / rect.height) - 0.5) * -12}deg`);
   card.classList.add("tilt");
-});
+  tiltCard = card;
+}
+
+productsGridEl.addEventListener("mousemove", (e) => {
+  tiltEvt = e;
+  if (!tiltRaf) tiltRaf = requestAnimationFrame(applyTilt);
+}, { passive: true });
 
 productsGridEl.addEventListener("mouseleave", () => {
-  document.querySelectorAll(".product-card.tilt").forEach(resetTilt);
+  tiltEvt = null;
+  if (tiltCard) { resetTilt(tiltCard); tiltCard = null; }
 });
 
 function resetTilt(card) {
@@ -7743,26 +7789,29 @@ document.getElementById("product-form").onsubmit = async (e) => {
 (function initHeroParticles() {
   const canvas = document.getElementById("particles-canvas");
   if (!canvas || !canvas.getContext) return;
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { alpha: true });
   const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const isMobile = window.matchMedia("(max-width: 767px)").matches;
-  const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
+  // dpr 1 já basta pra pontinhos de 1–2px e reduz muito os pixels pintados
+  const dpr = 1;
   const COLORS = ["124,92,255", "0,230,168"];
-  let width = 0, height = 0, particles = [], raf = null;
+  const FRAME_MS = 1000 / 30;       // 30 fps é suficiente pra esse efeito
+  const LINK_DIST = 130, LINK_DIST2 = LINK_DIST * LINK_DIST;
+  let width = 0, height = 0, particles = [], raf = null, last = 0;
 
   function resize() {
+    // canvas é fixo na tela: tamanho da viewport, NÃO da página inteira
     width = window.innerWidth;
-    height = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, window.innerHeight);
-    canvas.width = width * dpr; canvas.height = height * dpr;
-    canvas.style.width = width + "px"; canvas.style.height = height + "px";
+    height = window.innerHeight;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
   function seed() {
-    // no mobile usamos bem menos partículas (economiza CPU/bateria)
     const count = isMobile
-      ? Math.max(20, Math.min(90, Math.floor((width * height) / 22000)))
-      : Math.max(40, Math.min(260, Math.floor((width * height) / 15000)));
+      ? Math.max(14, Math.min(36, Math.floor((width * height) / 22000)))
+      : Math.max(30, Math.min(80, Math.floor((width * height) / 22000)));
     particles = Array.from({ length: count }, () => ({
       x: Math.random() * width,
       y: Math.random() * height,
@@ -7775,18 +7824,22 @@ document.getElementById("product-form").onsubmit = async (e) => {
 
   function drawStatic() {
     ctx.clearRect(0, 0, width, height);
-    particles.forEach((p) => {
+    for (const p of particles) {
       ctx.beginPath();
       ctx.fillStyle = `rgba(${p.c},.75)`;
       ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
       ctx.fill();
-    });
+    }
   }
 
-  function tick() {
+  function tick(now) {
+    raf = requestAnimationFrame(tick);
+    if (now - last < FRAME_MS) return;
+    const dt = Math.min((now - last) / 16.67, 3); // mantém a velocidade igual a 60fps
+    last = now;
     ctx.clearRect(0, 0, width, height);
     for (const p of particles) {
-      p.x += p.vx; p.y += p.vy;
+      p.x += p.vx * dt; p.y += p.vy * dt;
       if (p.x <= 0 || p.x >= width) p.vx *= -1;
       if (p.y <= 0 || p.y >= height) p.vy *= -1;
       ctx.beginPath();
@@ -7794,18 +7847,18 @@ document.getElementById("product-form").onsubmit = async (e) => {
       ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
       ctx.fill();
     }
-    // as linhas de conexão custam O(n²); no mobile isso é o que mais pesa
-    // na bateria, então pulamos e mantemos só as partículas se movendo.
+    // linhas de conexão (O(n²)) só no desktop
     if (!isMobile) {
+      ctx.lineWidth = 1;
       for (let i = 0; i < particles.length; i++) {
+        const a = particles[i];
         for (let j = i + 1; j < particles.length; j++) {
-          const a = particles[i], b = particles[j];
+          const b = particles[j];
           const dx = a.x - b.x, dy = a.y - b.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < 130) {
+          const d2 = dx * dx + dy * dy;      // sem Math.sqrt até saber que está perto
+          if (d2 < LINK_DIST2) {
+            ctx.strokeStyle = `rgba(124,92,255,${0.16 * (1 - Math.sqrt(d2) / LINK_DIST)})`;
             ctx.beginPath();
-            ctx.strokeStyle = `rgba(124,92,255,${0.16 * (1 - dist / 130)})`;
-            ctx.lineWidth = 1;
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
             ctx.stroke();
@@ -7813,13 +7866,13 @@ document.getElementById("product-form").onsubmit = async (e) => {
         }
       }
     }
-    raf = requestAnimationFrame(tick);
   }
 
   function start() {
     if (raf) return;
     if (prefersReduced) { drawStatic(); return; }
-    tick();
+    last = performance.now();
+    raf = requestAnimationFrame(tick);
   }
   function stop() {
     if (raf) { cancelAnimationFrame(raf); raf = null; }
@@ -7829,23 +7882,16 @@ document.getElementById("product-form").onsubmit = async (e) => {
   seed();
   start();
 
-  window.addEventListener("resize", () => { resize(); seed(); if (prefersReduced) drawStatic(); });
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { resize(); seed(); if (prefersReduced) drawStatic(); }, 200);
+  }, { passive: true });
 
-  // reajusta quando a altura da página muda (ex.: produtos carregando, imagens, etc.)
-  if ("ResizeObserver" in window) {
-    let resizeTimer = null;
-    new ResizeObserver(() => {
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => { resize(); seed(); if (prefersReduced) drawStatic(); }, 150);
-    }).observe(document.body);
-  }
-
-  // só anima enquanto o body está visível na tela, pra não gastar CPU à toa
-  if ("IntersectionObserver" in window) {
-    new IntersectionObserver((entries) => {
-      entries.forEach((entry) => (entry.isIntersecting ? start() : stop()));
-    }, { threshold: 0.01 }).observe(canvas.parentElement);
-  }
+  // não gasta CPU com a aba em segundo plano
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stop(); else start();
+  });
 })();
 
 /* ---------------- Glow magnético nos botões (segue o cursor) ---------------- */
@@ -9819,8 +9865,14 @@ document.addEventListener("click", (e) => {
   btn.innerHTML = "↑";
   btn.onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
   document.body.appendChild(btn);
+  let ticking = false;
   window.addEventListener("scroll", () => {
-    btn.classList.toggle("is-visible", window.scrollY > 500 && location.hash !== "#admin");
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      btn.classList.toggle("is-visible", window.scrollY > 500 && location.hash !== "#admin");
+      ticking = false;
+    });
   }, { passive: true });
 })();
 
